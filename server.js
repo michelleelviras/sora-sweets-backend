@@ -54,6 +54,19 @@ app.get('/api/productos', async (req, res) => {
   }
 });
 
+app.post('/api/productos', async (req, res) => {
+  try {
+    const nuevoProducto = new Producto(req.body);
+    await nuevoProducto.save();
+    res.status(201).json({ 
+      mensaje: "Producto agregado con éxito", 
+      producto: nuevoProducto 
+    });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
 app.post('/api/usuarios', async (req, res) => {
   try {
     const nuevoUsuario = new Usuario(req.body);
