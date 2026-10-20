@@ -4,7 +4,15 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin: [
+    'https://sorasweets.me',
+    'https://www.sorasweets.me'
+  ],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
+}));
 app.use(express.json());
 
 // Conexión a MongoDB Atlas con cifrado TLS/SSL
