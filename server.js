@@ -3,15 +3,18 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 
+const crypto = require('crypto');
+
 const app = express();
+const ORIGENES = ['https://sorasweets.me', 'https://www.sorasweets.me', 'http://localhost:5500', 'http://127.0.0.1:5500', 'http://localhost:3000'];
 app.use(cors({
-  origin: [
-    'https://sorasweets.me',
-    'https://www.sorasweets.me'
-  ],
+  origin: (origin, cb) => {
+    // Permite el dominio propio, pruebas locales y las vistas previas de Vercel (*.vercel.app)
+    if (!origin || ORIGENES.includes(origin) || /^https:\/\/[a-z0-9-]+\.vercel\.app$/.test(origin)) return cb(null, true);
+    cb(new Error('Origen no permitido por CORS'));
+  },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
 app.use(express.json());
 
@@ -33,8 +36,21 @@ const usuarioSchema = new mongoose.Schema({
     match: [/^\S+@\S+\.\S+$/, 'El email no tiene un formato válido']
   },
   rol: { type: String, default: 'Cliente' },
-  fecha_registro: { type: Date, default: Date.now }
+  fecha_registro: { type: Date, default: Date.now },
+  // Contraseña guardada como hash (scrypt + sal). select:false = no se devuelve en las consultas.
+  password_hash: { type: String, select: false },
+  password_salt: { type: String, select: false }
 }, { collection: 'usuarios' });
+
+function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
+  return { salt, hash: crypto.scryptSync(password, salt, 64).toString('hex') };
+}
+function checkPassword(password, salt, hash) {
+  const a = Buffer.from(crypto.scryptSync(password, salt, 64).toString('hex'));
+  const b = Buffer.from(hash);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+const publico = u => ({ _id: u._id, nombre: u.nombre, email: u.email, rol: u.rol, fecha_registro: u.fecha_registro });
 
 // NOTA: el índice de texto ya existe en Atlas, por eso NO se vuelve a declarar aquí
 // (MongoDB solo permite un índice de texto por colección).
@@ -44,6 +60,7 @@ const productoSchema = new mongoose.Schema({
   precio: { type: Number, required: [true, 'El precio es obligatorio'], min: [0, 'El precio no puede ser negativo'] },
   stock: { type: Number, default: 0, min: [0, 'El stock no puede ser negativo'] },
   descripcion: String,
+  imagen: String,
   // Subdocumento
   detalles: {
     pais_origen: String,
@@ -87,7 +104,7 @@ app.get('/api/productos', async (req, res) => {
     const filtro = {};
 
     if (req.query.todos !== 'true') filtro.stock = { $gt: 0 };
-    if (req.query.q) filtro.$text = {$search: req.query.q };
+    if (req.query.q) filtro.$text = { $search: req.query.q };
     if (req.query.categoria) filtro.categoria = req.query.categoria;
     if (req.query.pais) filtro['detalles.pais_origen'] = req.query.pais;
     if (req.query.vegano) filtro['detalles.es_vegano'] = req.query.vegano === 'true';
@@ -126,7 +143,8 @@ app.get('/api/productos/estadisticas/etiquetas', async (req, res) => {
   try {
     const datos = await Producto.aggregate([
       { $unwind: '$etiquetas' },
-      { $group: { _id: '$etiquetas', total: { $sum: 1 } } }, {$sort: { total: -1 } }
+      { $group: { _id: '$etiquetas', total: { $sum: 1 } } },
+      { $sort: { total: -1 } }
     ]);
     res.json(datos);
   } catch (error) {
@@ -197,13 +215,46 @@ app.delete('/api/productos/:id', async (req, res) => {
 // ─────────────────────────────────────────────
 // USUARIOS
 // ─────────────────────────────────────────────
+// Registro: email único y contraseña de mínimo 6 caracteres
 app.post('/api/usuarios', async (req, res) => {
   try {
-    const nuevoUsuario = new Usuario(req.body);
+    const { nombre, email, password } = req.body;
+    if (!password || String(password).length < 6) {
+      return res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres' });
+    }
+    const { salt, hash } = hashPassword(String(password));
+    const correo = String(email || '').trim().toLowerCase();
+    const existente = await Usuario.findOne({ email: correo }).select('+password_hash');
+
+    if (existente) {
+      // Cuentas antiguas (creadas sin contraseña): permite "reclamarlas" una sola vez
+      if (existente.password_hash) return res.status(409).json({ error: 'Ese correo ya está registrado. Inicia sesión.' });
+      existente.password_hash = hash; existente.password_salt = salt;
+      if (nombre) existente.nombre = nombre;
+      await existente.save();
+      return res.status(200).json({ mensaje: 'Cuenta activada con éxito', usuario: publico(existente) });
+    }
+
+    const nuevoUsuario = new Usuario({ nombre, email: correo, password_hash: hash, password_salt: salt });
     await nuevoUsuario.save();
-    res.status(201).json({ mensaje: 'Usuario registrado con éxito', usuario: nuevoUsuario });
+    res.status(201).json({ mensaje: 'Usuario registrado con éxito', usuario: publico(nuevoUsuario) });
   } catch (error) {
     res.status(400).json({ error: error.message });
+  }
+});
+
+// Inicio de sesión
+app.post('/api/login', async (req, res) => {
+  try {
+    const correo = String(req.body.email || '').trim().toLowerCase();
+    const password = String(req.body.password || '');
+    const u = await Usuario.findOne({ email: correo }).select('+password_hash +password_salt');
+    if (!u || !u.password_hash || !checkPassword(password, u.password_salt, u.password_hash)) {
+      return res.status(401).json({ error: 'Correo o contraseña incorrectos' });
+    }
+    res.json({ mensaje: 'Sesión iniciada', usuario: publico(u) });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
