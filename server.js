@@ -20,7 +20,7 @@ app.use(express.json());
 
 // Conexión a MongoDB Atlas con cifrado TLS/SSL
 mongoose.connect(process.env.MONGO_URI)
-  .then(() => console.log('✅ Conectado con éxito a MongoDB Atlas (Sora Sweets DB)'))
+  .then(() => console.log('✅ Conectado con éxito a MongoDB Atlas. Base de datos: "' + mongoose.connection.name + '" (colecciones: usuarios, productos, ordenes)'))
   .catch(err => console.error('❌ Error al conectar a MongoDB:', err));
 
 // ─────────────────────────────────────────────
